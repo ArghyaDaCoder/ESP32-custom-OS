@@ -1,4 +1,11 @@
+# ============================================================
+#  wokwi.toml  –  Wokwi for VS Code simulator config
+#
+#  This tells Wokwi where PlatformIO puts the compiled binary.
+#  After running  pio run -e wrover_ili9341
+#  press F1 → "Wokwi: Start Simulator"
+# ============================================================
 [wokwi]
-version = 1
-firmware = ".pio/build/esp32-s3-wrover/firmware.bin"
-elf = ".pio/build/esp32-s3-wrover/firmware.elf"
+version  = 1
+elf      = ".pio/build/wrover_ili9341/firmware.elf"
+firmware = ".pio/build/wrover_ili9341/firmware.bin"

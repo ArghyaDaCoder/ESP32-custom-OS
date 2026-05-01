@@ -1,101 +1,103 @@
+// ============================================================
+//  main.cpp  –  ESP32 Runtime OS  –  Entry point
+//
+//  RIGHT NOW this is a HAL smoke test.  It:
+//    1. Boots the board (display + input)
+//    2. Draws coloured rectangles using only IDisplay*
+//    3. Polls IInput* and prints events to Serial
+//
+//  Notice: NOT ONE LINE in this file mentions ILI9341,
+//  TFT_eSPI, or any GPIO pin number.  All of that lives
+//  in boards/.  This file will never change as you add
+//  hardware support.
+// ============================================================
 #include <Arduino.h>
-#include <TFT_eSPI.h>
+#include "hal/IBoardConfig.h"   // the only HAL header main needs
 
-TFT_eSPI tft = TFT_eSPI(); 
+// The board pointer – global, lives for the entire program.
+static IBoardConfig* board   = nullptr;
+static IDisplay*     display = nullptr;
+static IInput*       input   = nullptr;
 
-// 1. The OS Variables
-int systemUptime = 0;
-int simulatedMemoryLoad = 100;
+// ── Helper: draw a simple test pattern ──────────────────────
+static void drawTestPattern() {
+    uint16_t w = display->width();
+    uint16_t h = display->height();
 
-// 2. The Mutex (The Keycard)
-// We use this to stop Core 1 from reading variables at the EXACT 
-// millisecond Core 0 is writing to them.
-SemaphoreHandle_t osDataMutex; 
+    display->fillScreen(IDisplay::BLACK);
 
-// ---------------------------------------------------------
-// CORE 0: THE BACKEND SYSTEM (Runs in the background)
-// ---------------------------------------------------------
-void backendTask(void *pvParameters) {
-    while(true) {
-        // Lock the data, update it, unlock it
-        if (xSemaphoreTake(osDataMutex, portMAX_DELAY)) {
-            systemUptime++;
-            simulatedMemoryLoad = random(100, 800); // Fake memory flux
-            xSemaphoreGive(osDataMutex);
-        }
+    // Four coloured quadrants
+    display->fillRect(0,     0,     w/2, h/2, IDisplay::RED);
+    display->fillRect(w/2,   0,     w/2, h/2, IDisplay::GREEN);
+    display->fillRect(0,     h/2,   w/2, h/2, IDisplay::BLUE);
+    display->fillRect(w/2,   h/2,   w/2, h/2, IDisplay::YELLOW);
 
-        // Print to the serial monitor so we know Core 0 is alive
-        Serial.printf("[Core 0] Backend Tick - Uptime: %d\n", systemUptime);
-        
-        // Sleep for exactly 1 second
-        vTaskDelay(1000 / portTICK_PERIOD_MS); 
-    }
+    // White cross-hair in the centre
+    display->fillRect(w/2 - 1, 0,     2, h, IDisplay::WHITE);
+    display->fillRect(0,       h/2-1, w, 2, IDisplay::WHITE);
+
+    Serial.printf("[HAL] Test pattern drawn.  Screen: %u x %u\n", w, h);
 }
 
-// ---------------------------------------------------------
-// SETUP: THE BOOTLOADER
-// ---------------------------------------------------------
+// ── Arduino setup ────────────────────────────────────────────
 void setup() {
     Serial.begin(115200);
-    
-    // Create the Mutex Key
-    osDataMutex = xSemaphoreCreateMutex();
+    delay(300);  // let the serial monitor connect in Wokwi
 
-    // Boot Graphics
-    tft.init();
-    tft.setRotation(1);
-    tft.fillScreen(TFT_BLACK);
+    Serial.println("\n========================================");
+    Serial.println("  ESP32 Runtime OS  –  HAL smoke test");
+    Serial.println("========================================");
 
-    // Draw Static UI (Things that never change)
-    tft.setTextColor(TFT_CYAN, TFT_BLACK);
-    tft.setTextSize(2);
-    tft.setCursor(10, 10);
-    tft.println("--- ArghyaOS v1.0 ---");
+    // ── Create and initialise the board ──────────────────────
+    // Board::create() is in BoardFactory.cpp.
+    // It returns the right concrete board based on the
+    // -D BOARD_xxx flag you set in platformio.ini.
+    board   = Board::create();
+    display = board->getDisplay();
+    input   = board->getInput();
 
-    tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
-    tft.setCursor(10, 60);
-    tft.print("CPU0: Backend Logic");
-    tft.setCursor(10, 90);
-    tft.print("CPU1: GUI Engine");
+    board->init();
 
-    // Spawn the Backend Task on Core 0
-    xTaskCreatePinnedToCore(
-        backendTask,    // The function to run
-        "Backend",      // Name for debugging
-        4000,           // Stack size (Memory reserved for this task)
-        NULL,           // Parameters
-        1,              // Priority
-        NULL,           // Task Handle
-        0               // Pin to Core 0
-    );
+    Serial.printf("[HAL] Board ready: %s\n", board->name());
+    Serial.printf("[HAL] Display: %u x %u px\n",
+                  display->width(), display->height());
+
+    // PSRAM sanity check (WROVER only)
+#if defined(BOARD_HAS_PSRAM)
+    if (psramFound()) {
+        Serial.printf("[HAL] PSRAM: %u KB free\n",
+                      esp_get_free_heap_size() / 1024);
+    } else {
+        Serial.println("[HAL] WARNING: PSRAM not detected!");
+    }
+#endif
+
+    drawTestPattern();
+
+    Serial.println("[HAL] Press UP or SEL button to test input.");
 }
 
-// ---------------------------------------------------------
-// CORE 1: THE FRONTEND GUI (Arduino loop() defaults to Core 1)
-// ---------------------------------------------------------
+// ── Arduino loop ─────────────────────────────────────────────
 void loop() {
-    int currentUptime = 0;
-    int currentMem = 0;
+    InputEvent evt;
+    if (input->read(evt)) {
+        const char* typeName = "UNKNOWN";
+        switch (evt.type) {
+            case InputEventType::PRESS:   typeName = "PRESS";   break;
+            case InputEventType::RELEASE: typeName = "RELEASE"; break;
+            case InputEventType::MOVE:    typeName = "MOVE";    break;
+            default: break;
+        }
+        Serial.printf("[INPUT] %s  id=%u  x=%d  y=%d\n",
+                      typeName, evt.id, evt.x, evt.y);
 
-    // 1. Grab the latest data from the backend safely
-    if (xSemaphoreTake(osDataMutex, portMAX_DELAY)) {
-        currentUptime = systemUptime;
-        currentMem = simulatedMemoryLoad;
-        xSemaphoreGive(osDataMutex);
+        // Visual feedback: invert a small square on button press
+        if (evt.type == InputEventType::PRESS) {
+            uint16_t colour = (evt.id == 0) ? IDisplay::CYAN
+                                             : IDisplay::MAGENTA;
+            display->fillRect(10, 10, 30, 30, colour);
+        }
     }
 
-    // 2. Render the changing data to the screen
-    // Notice we pass TFT_BLACK as the second color. This erases the old numbers automatically!
-    tft.setTextColor(TFT_GREEN, TFT_BLACK); 
-    tft.setTextSize(3);
-    
-    tft.setCursor(10, 150);
-    tft.printf("UPTIME: %04d sec", currentUptime);
-
-    tft.setTextColor(TFT_YELLOW, TFT_BLACK); 
-    tft.setCursor(10, 200);
-    tft.printf("RAM: %04d KB", currentMem);
-
-    // Run the GUI at roughly 20 Frames Per Second (FPS)
-    vTaskDelay(50 / portTICK_PERIOD_MS); 
+    delay(10);  // yield – keeps Wokwi simulation smooth
 }
